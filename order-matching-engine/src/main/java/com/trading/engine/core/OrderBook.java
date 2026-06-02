@@ -1,46 +1,75 @@
-package com.trading.engine.model;
+package com.trading.engine.core;
 
-public class Order {
-    public enum Side {
-        BUY, SELL
-    }
+import com.trading.engine.model.Order;
+import java.util.Comparator;
+import java.util.PriorityQueue;
 
-    private final String orderId;
+public class OrderBook {
     private final String symbol;
-    private final double price;
-    private int quantity; // Mutable because quantity decreases when partially filled
-    private final Side side;
-    private final long timestamp;
 
-    public Order(String orderId, String symbol, double price, int quantity, Side side) {
-        this.orderId = orderId;
+    // Buy Orders (Bids): Highest price first. If same price, oldest timestamp first.
+    private final PriorityQueue<Order> bids;
+    
+    // Sell Orders (Asks): Lowest price first. If same price, oldest timestamp first.
+    private final PriorityQueue<Order> asks;
+
+    public OrderBook(String symbol) {
         this.symbol = symbol;
-        this.price = price;
-        this.quantity = quantity;
-        this.side = side;
-        this.timestamp = System.nanoTime(); // Used for Time-Priority matching
+        
+        this.bids = new PriorityQueue<>(
+            Comparator.comparingDouble(Order::getPrice).reversed()
+                      .thenComparingLong(Order::getTimestamp)
+        );
+        
+        this.asks = new PriorityQueue<>(
+            Comparator.comparingDouble(Order::getPrice)
+                      .thenComparingLong(Order::getTimestamp)
+        );
     }
 
-    public String getOrderId() { return orderId; }
-    public String getSymbol() { return symbol; }
-    public double getPrice() { return price; }
-    public int getQuantity() { return quantity; }
-    public Side getSide() { return side; }
-    public long getTimestamp() { return timestamp; }
-
-    public void reduceQuantity(int amount) {
-        if (amount > this.quantity) {
-            throw new IllegalArgumentException("Cannot reduce more than available quantity");
+    // Synchronized keyword prevents Race Conditions when multiple threads submit orders
+    public synchronized void processOrder(Order order) {
+        System.out.println("Received: " + order);
+        
+        if (order.getSide() == Order.Side.BUY) {
+            matchOrder(order, asks, bids);
+        } else {
+            matchOrder(order, bids, asks);
         }
-        this.quantity -= amount;
     }
 
-    public boolean isFilled() {
-        return this.quantity == 0;
-    }
+    private void matchOrder(Order incomingOrder, PriorityQueue<Order> opposingBook, PriorityQueue<Order> sameBook) {
+        while (!opposingBook.isEmpty() && !incomingOrder.isFilled()) {
+            Order bestOpposingOrder = opposingBook.peek();
 
-    @Override
-    public String toString() {
-        return String.format("Order[%s %s %d @ %.2f - %s]", side, symbol, quantity, price, orderId);
+            // Check if price matches
+            boolean isMatch = incomingOrder.getSide() == Order.Side.BUY ? 
+                              incomingOrder.getPrice() >= bestOpposingOrder.getPrice() : 
+                              incomingOrder.getPrice() <= bestOpposingOrder.getPrice();
+
+            if (!isMatch) {
+                break; // No more matching prices available
+            }
+
+            int tradeQuantity = Math.min(incomingOrder.getQuantity(), bestOpposingOrder.getQuantity());
+            double executionPrice = bestOpposingOrder.getPrice(); // Trade executes at maker's price
+
+            System.out.printf(">>> TRADE EXECUTED: %d shares of %s @ %.2f (Taker: %s, Maker: %s)\n",
+                    tradeQuantity, symbol, executionPrice, incomingOrder.getOrderId(), bestOpposingOrder.getOrderId());
+
+            incomingOrder.reduceQuantity(tradeQuantity);
+            bestOpposingOrder.reduceQuantity(tradeQuantity);
+
+            // Remove filled orders from the book
+            if (bestOpposingOrder.isFilled()) {
+                opposingBook.poll();
+            }
+        }
+
+        // If incoming order is not fully filled, add it to the book to wait for future matches
+        if (!incomingOrder.isFilled()) {
+            sameBook.add(incomingOrder);
+            System.out.println("Added to book: " + incomingOrder);
+        }
     }
 }
